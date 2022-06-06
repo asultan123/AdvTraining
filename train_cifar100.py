@@ -23,8 +23,11 @@ CIFAR100_STD = (0.2673342858792401, 0.2564384629170883, 0.27615047132568404)
 mu = torch.tensor(CIFAR100_MEAN).view(3,1,1).cuda()
 std = torch.tensor(CIFAR100_STD).view(3,1,1).cuda()
 
+# def normalize(X):
+#     return (X - mu)/std
+
 def normalize(X):
-    return (X - mu)/std
+    return X
 
 upper_limit, lower_limit = 1,0
 

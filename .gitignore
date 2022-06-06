@@ -1,2 +1,5 @@
 cifar100_model/
 __pycache__/
+slurm_reports/
+cifar100-data/
+data/

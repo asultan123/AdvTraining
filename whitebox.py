@@ -1,14 +1,14 @@
-from pydoc import cli
-from networks.ensemble_resnet import (
-    avg_ensemble_2_vgg8,
-    avg_ensemble_3_resnet18,
-    avg_ensemble_3_resnet18_fc,
-    cat_1_resnet34,
-    cat_1_resnet50,
-    ensemble_1_resnet18,
-    ensemble_1_resnet34,
-    ensemble_1_resnet50,
-)
+# from networks.ensemble_resnet import (
+#     avg_ensemble_2_vgg8,
+#     avg_ensemble_3_resnet18,
+#     avg_ensemble_3_resnet18_fc,
+#     cat_1_resnet34,
+#     cat_1_resnet50,
+#     ensemble_1_resnet18,
+#     ensemble_1_resnet34,
+#     ensemble_1_resnet50,
+# )
+import pickle
 from config.dataset_config import getData
 from art.classifiers import PyTorchClassifier
 from art.attacks.saliency_map import SaliencyMapMethod
@@ -17,10 +17,9 @@ from art.attacks import (
     FastGradientMethod,
     ProjectedGradientDescent,
 )
-import progress
 import cw
 from sklearn.metrics import confusion_matrix
-import torch.optim as optim
+# import torch.optim as optim
 import torch.nn.functional as F
 import torch.nn as nn
 import numpy as np
@@ -28,9 +27,13 @@ import pickle as pkl
 import os
 import argparse
 import torch
-from functools import partial
+# from functools import partial
 import os
 import random
+from preactresnet import PreActResNet18
+# from torchvision import datasets, transforms
+
+
 torch.cuda.current_device()
 torch.use_deterministic_algorithms(True)
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -39,8 +42,8 @@ parser = argparse.ArgumentParser(description="PyTorch CNN Testing")
 parser.add_argument(
     "--method",
     type=str,
-    default="pdd_deg",
-    help="methods:[baseline adp deg pdd pdd_deg]",
+    default="adv_train",
+    help="methods:[baseline adp deg pdd pdd_deg adv_train]",
 )
 parser.add_argument(
     "--dataset",
@@ -53,13 +56,23 @@ parser.add_argument(
 )
 parser.add_argument("--norm", type=str, default="Linf", help="norm:[L2, Linf]")
 parser.add_argument("--model-path", type=str,
-                    default="./models", help="model path")
-parser.add_argument("--bs", type=int, default=20, help="batch size")
+                    default=None, help="model path")
+parser.add_argument("--model-base-path", type=str,
+                    default="./cifar100_model", help="model base path")
+parser.add_argument("--eval-path", type=str,
+                    default=None, help="model path")
+parser.add_argument("--bs", type=int, default=128, help="batch size")
 parser.add_argument("--conf", action="store_true")
 parser.add_argument("--save_dir", type=str, default="bs",
                     help="save confusion matrix")
+parser.add_argument('--data-dir', default='./cifar100-data', type=str)
 
+parser.add_argument('--show-progress', action='store_true')
+parser.set_defaults(show_progress=False)
 opt = parser.parse_args()
+
+if opt.show_progress:
+    import progress
 
 
 class LogNLLLoss(nn.Module):
@@ -87,6 +100,7 @@ if opt.dataset == "Tiny_Image":
     num_classes, train_data, test_data = getData("Tiny_Image")
     input_shape = (opt.bs, 3, 64, 64)
 
+
 trainloader = torch.utils.data.DataLoader(
     train_data, batch_size=opt.bs, shuffle=True, num_workers=4, pin_memory=True
 )
@@ -95,47 +109,23 @@ testloader = torch.utils.data.DataLoader(
     test_data, batch_size=opt.bs, shuffle=False, num_workers=4, pin_memory=True
 )
 
-
-if opt.method == "baseline_3_resnet18":
-    model = avg_ensemble_3_resnet18(num_classes)
-    model_str = "/bs_ensemble_3_resnet18"
-elif opt.method == "baseline_1_resnet18":
-    model = ensemble_1_resnet18(num_classes)
-    model_str = "/bs_ensemble_1_resnet18"
-elif opt.method == "baseline_1_resnet34":
-    model = ensemble_1_resnet34(num_classes)
-    model_str = "/bs_ensemble_1_resnet34"
-elif opt.method == "baseline_1_resnet50":
-    model = ensemble_1_resnet50(num_classes)
-    model_str = "/bs_ensemble_1_resnet50"
-elif opt.method == "adp":
-    model = avg_ensemble_3_resnet18(num_classes)
-    model_str = "/adp_ensemble_3_resnet18"
-elif opt.method == "deg":
-    model = avg_ensemble_3_resnet18(num_classes)
-    model_str = "/deg_ensemble_3_resnet18"
-elif opt.method == "pdd":
-    model = avg_ensemble_3_resnet18_fc(num_classes)
-    model_str = "/pdd_ensemble_3_resnet18_fc"
-elif opt.method == "pdd_deg":
-    model = avg_ensemble_3_resnet18_fc(num_classes)
-    model_str = "/pdd_deg_ensemble_3_resnet18_fc"
-elif opt.method == "adp_vgg8":
-    model = avg_ensemble_2_vgg8(num_classes)
-    model_str = "/adp_vgg8_ensemble_2_vgg8"
-elif opt.method == "cat_1_resnet34":
-    model = cat_1_resnet34(num_classes)
-    model_str = "/cat_cat_1_resnet34"
-elif opt.method == "cat_1_resnet50":
-    model = cat_1_resnet50(num_classes)
-    model_str = "/cat_cat_1_resnet50"
+if opt.method == "adv_train":
+    model = PreActResNet18(num_classes)
+    model_str = "/adv_train_preActResNet18"
 else:
     raise NotImplementedError
 
-model_path = opt.model_path + "/" + opt.dataset + model_str + "/best_model.pth"
-model.load_state_dict(torch.load(model_path)["net"])
-conf_mat_file = os.path.join(
-    "models/" + opt.dataset + model_str, "conf_mat.pkl")
+if opt.model_path is None:
+    model_path = opt.model_base_path + "/" + opt.dataset + model_str + "/best_model.pth"
+else:
+    model_path = opt.model_path
+
+if opt.method != "adv_train":
+    model.load_state_dict(torch.load(model_path)["net"])
+else:
+    model.load_state_dict(torch.load(model_path))
+
+
 
 model.cuda()
 model.eval()
@@ -157,25 +147,6 @@ np.random.seed(2302)
 random.seed(2302)
 
 
-class Clever_PGD_Wrapper():
-    def __init__(self, net, nb_iter, eps, eps_iter, clip_min, clip_max, norm, rand_init):
-        self.pgd_fn = lambda x: clever_projected_gradient_descent(
-            net,
-            x,
-            nb_iter=nb_iter,
-            eps=eps,
-            eps_iter=eps_iter,
-            clip_min=clip_min,
-            clip_max=clip_max,
-            norm=norm,
-            rand_init=rand_init,
-            sanity_checks=False
-        )
-
-    def generate(self, x):
-        return self.pgd_fn(x=x)
-
-
 def test_clean(testloader, model):
     correct = 0
     total = 0
@@ -189,12 +160,14 @@ def test_clean(testloader, model):
         correct += predicted.eq(targets.data).cpu().sum()
         total += targets.size(0)
 
-        progress.progress_bar(
-            batch_idx,
-            len(testloader),
-            "clean_acc: %.3f%% (%d/%d)"
-            "" % (100.0 * float(correct) / total, correct, total),
-        )
+        if opt.show_progress:
+            progress.progress_bar(
+                batch_idx,
+                len(testloader),
+                "clean_acc: %.3f%% (%d/%d)"
+                "" % (100.0 * float(correct) / total, correct, total),
+            )
+    return 100 * float(correct) / total
 
 
 def test_robust(opt, model, classifier, attack_method, c, norm=None):
@@ -212,15 +185,11 @@ def test_robust(opt, model, classifier, attack_method, c, norm=None):
             classifier,
             norm=norm,
             eps=c,
-            eps_step=c / 10.0,
+            eps_step=c / 10,
             max_iter=10,
             targeted=False,
             num_random_init=0,
             batch_size=opt.bs,
-        )
-    if opt.attack == "CleverPGD":
-        adv_crafter = Clever_PGD_Wrapper(
-            model, nb_iter=10, eps=c, eps_iter=c/10, clip_min=0, clip_max=1, norm=norm, rand_init=False
         )
     if opt.attack == "BIM":
         adv_crafter = ProjectedGradientDescent(
@@ -249,12 +218,15 @@ def test_robust(opt, model, classifier, attack_method, c, norm=None):
             optimizer_lr=0.01,
         )
 
-    correct = 0
+    exclusive_correct = 0
     total = 0
     total_sum = 0
     common_id = []
     y_pred = []
     y_true = []
+
+    test_n = 0
+    inclusive_correct = 0
     for batch_idx, (inputs, targets) in enumerate(testloader):
         inputs, targets = inputs.cuda(), targets.cuda()
         output = classifier.predict(inputs.cpu().numpy(), batch_size=opt.bs)
@@ -279,39 +251,47 @@ def test_robust(opt, model, classifier, attack_method, c, norm=None):
         final_pred = perturbed_output.max(1, keepdim=False)[1]
         total_sum += targets.size(0)
         total += len(common_id)
-        correct += final_pred[common_id].eq(
+        exclusive_correct += final_pred[common_id].eq(
             targets[common_id].data).cpu().sum()
-        attack_acc = 100.0 * float(correct) / total
+        exclusive_attack_acc = 100.0 * float(exclusive_correct) / total
+
+        inclusive_correct += (perturbed_output.max(1)[1] == targets).sum().item()
+        test_n += targets.size(0)
+        inclusive_attack_acc = 100.0 * float(inclusive_correct) / test_n
 
         if opt.conf:
             y_pred.extend(final_pred.data.cpu().numpy())  # Save Prediction
             y_true.extend(targets.data.cpu().numpy())  # Save Truth
 
-        progress.progress_bar(
-            batch_idx,
-            len(testloader),
-            "Attack Strength:%.3f, robust accuracy: %.3f%% (%d/%d)"
-            "" % (c, attack_acc, correct, total),
-        )
+        if opt.show_progress:
+            progress.progress_bar(
+                batch_idx,
+                len(testloader),
+                "Attack Strength:%.3f, robust accuracy (exclusive): %.3f%% (%d/%d), robust accuracy (inclusive): %.3f%% (%d/%d)"
+                "" % (c, exclusive_attack_acc, exclusive_correct, total, inclusive_attack_acc, inclusive_correct, test_n),
+            )
 
     if opt.conf:
         print("==> Generating confusion matrix..")
         cf_matrix = confusion_matrix(y_true, y_pred)
         print(cf_matrix)
+        conf_mat_file = os.path.join("models/" + opt.dataset + model_str, "conf_mat.pkl")
         with open(conf_mat_file, "wb") as f:
             pkl.dump(cf_matrix, f)
         print("==> Saved confusion matrix in {}..".format(conf_mat_file))
 
+    return {'eps': c, 'inclusive': inclusive_attack_acc, 'exclusive': exclusive_attack_acc}
 
 if __name__ == "__main__":
     print("Clean Accuracy:")
-    test_clean(testloader, model)
-
+    result_dict = {}
+    correct_acc = test_clean(testloader, model)
+    result_dict['clean'] = correct_acc
     print("Attack: {}".format(opt.attack))
     if opt.attack == "FGSM" or "BIM" or "PGD":
         if opt.norm == "Linf":
             # [0.005, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64]
-            epsilons = [0.01, 0.02]
+            epsilons = [0.01, 0.02, 8/255]
             norm = np.inf
         if opt.norm == "L2":
             epsilons = [0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8]
@@ -322,6 +302,12 @@ if __name__ == "__main__":
     if opt.attack == "CW":
         epsilons = [0.001, 0.01, 0.1]
         norm = None
-
+    result_dict['attacked'] = []
     for eps in epsilons:
-        test_robust(opt, model, classifier, opt.attack, eps, norm=norm)
+        print(f"Evaluating error: {eps}")
+        attack_result = test_robust(opt, model, classifier, opt.attack, eps, norm=norm)
+        result_dict['attacked'].append(attack_result)
+    if opt.eval_path:
+        with open(opt.eval_path, "wb") as file:
+            pickle.dump(result_dict, file)
+    print(result_dict)
