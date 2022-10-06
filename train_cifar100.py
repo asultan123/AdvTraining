@@ -1,4 +1,8 @@
 
+from networks.ensemble_resnet import cat_fc, cat_1_resnet18, cat_1_resnet34
+from preactresnet import PreActResNet18
+from wideresnet import WideResNet
+import os
 import argparse
 import logging
 import sys
@@ -12,28 +16,39 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from torchvision import datasets, transforms
 
-import os
-
-from wideresnet import WideResNet
-from preactresnet import PreActResNet18
 
 CIFAR100_MEAN = (0.5070751592371323, 0.48654887331495095, 0.4409178433670343)
 CIFAR100_STD = (0.2673342858792401, 0.2564384629170883, 0.27615047132568404)
 
-mu = torch.tensor(CIFAR100_MEAN).view(3,1,1).cuda()
-std = torch.tensor(CIFAR100_STD).view(3,1,1).cuda()
+mu = torch.tensor(CIFAR100_MEAN).view(3, 1, 1).cuda()
+std = torch.tensor(CIFAR100_STD).view(3, 1, 1).cuda()
 
 # def normalize(X):
 #     return (X - mu)/std
 
+
+def get_ensemble_model(num_classes, method):
+    if method == "cat_1_resnet18":
+        model = cat_1_resnet18(num_classes)
+        model_str = "/cat_cat_1_resnet18"
+    elif method == "cat_1_resnet34":
+        model = cat_1_resnet34(num_classes)
+        model_str = "/cat_cat_1_resnet34"
+    else:
+        raise NotImplementedError
+    return model, model_str
+
+
 def normalize(X):
     return X
 
-upper_limit, lower_limit = 1,0
+
+upper_limit, lower_limit = 1, 0
 
 
 def clamp(X, lower_limit, upper_limit):
     return torch.max(torch.min(X, upper_limit), lower_limit)
+
 
 def mixup_data(x, y, alpha=1.0):
     '''Returns mixed inputs, pairs of targets, and lambda'''
@@ -65,8 +80,8 @@ def attack_pgd(model, X, y, epsilon, alpha, attack_iters, restarts,
             delta.uniform_(-epsilon, epsilon)
         elif norm == "l_2":
             delta.normal_()
-            d_flat = delta.view(delta.size(0),-1)
-            n = d_flat.norm(p=2,dim=1).view(delta.size(0),1,1,1)
+            d_flat = delta.view(delta.size(0), -1)
+            n = d_flat.norm(p=2, dim=1).view(delta.size(0), 1, 1, 1)
             r = torch.zeros_like(n).uniform_(0, 1)
             delta *= r/n*epsilon
         else:
@@ -78,12 +93,13 @@ def attack_pgd(model, X, y, epsilon, alpha, attack_iters, restarts,
             if early_stop:
                 index = torch.where(output.max(1)[1] == y)[0]
             else:
-                index = slice(None,None,None)
+                index = slice(None, None, None)
             if not isinstance(index, slice) and len(index) == 0:
                 break
             if mixup:
                 criterion = nn.CrossEntropyLoss()
-                loss = mixup_criterion(criterion, model(normalize(X+delta)), y_a, y_b, lam)
+                loss = mixup_criterion(criterion, model(
+                    normalize(X+delta)), y_a, y_b, lam)
             else:
                 loss = F.cross_entropy(output, y)
             loss.backward()
@@ -92,19 +108,24 @@ def attack_pgd(model, X, y, epsilon, alpha, attack_iters, restarts,
             g = grad[index, :, :, :]
             x = X[index, :, :, :]
             if norm == "l_inf":
-                d = torch.clamp(d + alpha * torch.sign(g), min=-epsilon, max=epsilon)
+                d = torch.clamp(d + alpha * torch.sign(g),
+                                min=-epsilon, max=epsilon)
             elif norm == "l_2":
-                g_norm = torch.norm(g.view(g.shape[0],-1),dim=1).view(-1,1,1,1)
+                g_norm = torch.norm(
+                    g.view(g.shape[0], -1), dim=1).view(-1, 1, 1, 1)
                 scaled_g = g/(g_norm + 1e-10)
-                d = (d + scaled_g*alpha).view(d.size(0),-1).renorm(p=2,dim=0,maxnorm=epsilon).view_as(d)
+                d = (d + scaled_g*alpha).view(d.size(0), -
+                                              1).renorm(p=2, dim=0, maxnorm=epsilon).view_as(d)
             d = clamp(d, lower_limit - x, upper_limit - x)
             delta.data[index, :, :, :] = d
             delta.grad.zero_()
         if mixup:
             criterion = nn.CrossEntropyLoss(reduction='none')
-            all_loss = mixup_criterion(criterion, model(normalize(X+delta)), y_a, y_b, lam)
+            all_loss = mixup_criterion(criterion, model(
+                normalize(X+delta)), y_a, y_b, lam)
         else:
-            all_loss = F.cross_entropy(model(normalize(X+delta)), y, reduction='none')
+            all_loss = F.cross_entropy(
+                model(normalize(X+delta)), y, reduction='none')
         max_delta[all_loss >= max_loss] = delta.detach()[all_loss >= max_loss]
         max_loss = torch.max(max_loss, all_loss)
     return max_delta
@@ -115,17 +136,20 @@ def get_args():
     parser.add_argument('--model', default='PreActResNet18')
     parser.add_argument('--l2', default=0, type=float)
     parser.add_argument('--l1', default=0, type=float)
-    parser.add_argument('--batch-size', default=128, type=int)
+    parser.add_argument('--batch-size', default=64, type=int)
     parser.add_argument('--data-dir', default='../cifar100-data', type=str)
-    parser.add_argument('--epochs', default=200, type=int)
-    parser.add_argument('--lr-schedule', default='piecewise', choices=['superconverge', 'piecewise'])
+    parser.add_argument('--epochs', default=150, type=int)
+    parser.add_argument('--lr-schedule', default='piecewise',
+                        choices=['superconverge', 'piecewise'])
     parser.add_argument('--lr-max', default=0.1, type=float)
-    parser.add_argument('--attack', default='pgd', type=str, choices=['pgd', 'none'])
+    parser.add_argument('--attack', default='pgd',
+                        type=str, choices=['pgd', 'none'])
     parser.add_argument('--epsilon', default=8, type=int)
     parser.add_argument('--attack-iters', default=10, type=int)
     parser.add_argument('--restarts', default=1, type=int)
     parser.add_argument('--pgd-alpha', default=2, type=float)
-    parser.add_argument('--norm', default='l_inf', type=str, choices=['l_inf', 'l_2'])
+    parser.add_argument('--norm', default='l_inf',
+                        type=str, choices=['l_inf', 'l_2'])
     parser.add_argument('--fname', default='cifar100_model', type=str)
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--half', action='store_true')
@@ -135,6 +159,14 @@ def get_args():
     parser.add_argument('--cutout-len', type=int)
     parser.add_argument('--mixup', action='store_true')
     parser.add_argument('--mixup-alpha', type=float)
+    parser.add_argument('--pretrained', type=float)
+    parser.add_argument("--train_fused", default=False, type=bool)
+    parser.add_argument("--model_paths", nargs='+', default=None,
+                        help="path to the model checkpoint")
+    parser.add_argument("--ensemble_model_type", default=None,
+                        help="path to the model checkpoint")
+    parser.add_argument("--frozen", default=True,
+                        help="path to the model checkpoint")
     return parser.parse_args()
 
 
@@ -150,7 +182,7 @@ def main():
         datefmt='%Y/%m/%d %H:%M:%S',
         level=logging.DEBUG,
         handlers=[
-            logging.FileHandler(os.path.join(args.fname,'output.log')),
+            logging.FileHandler(os.path.join(args.fname, 'output.log')),
             logging.StreamHandler()
         ])
 
@@ -195,33 +227,51 @@ def main():
     if args.model == 'PreActResNet18':
         model = PreActResNet18(num_classes=100)
     elif args.model == 'WideResNet':
-        model = WideResNet(34, 10, widen_factor=args.width_factor, dropRate=0.0)
+        model = WideResNet(
+            34, 10, widen_factor=args.width_factor, dropRate=0.0)
+    elif args.model == 'cat_fc':
+        assert args.model_paths is not None
+        num_models = len(args.model_paths)
+        model = cat_fc(100, num_models, args.frozen)
     else:
         raise ValueError("Unknown model")
+
+    if args.train_fused:
+        assert args.model_paths is not None
+        number_of_models = len(args.model_paths)
+        model_list = []
+        for sub_model_path in args.model_paths:
+            sub_model, model_str = get_ensemble_model(
+                100, args.ensemble_model_type)
+            sub_model.load_state_dict(torch.load(sub_model_path)["net"])
+            model_list.append(sub_model)
+        model.load_models(model_list)
 
     model = model.cuda()
     model.train()
 
     if args.l2:
         decay, no_decay = [], []
-        for name,param in model.named_parameters():
+        for name, param in model.named_parameters():
             if 'bn' not in name and 'bias' not in name:
                 decay.append(param)
             else:
                 no_decay.append(param)
-        params = [{'params':decay, 'weight_decay':args.l2},
-                  {'params':no_decay, 'weight_decay': 0 }]
+        params = [{'params': decay, 'weight_decay': args.l2},
+                  {'params': no_decay, 'weight_decay': 0}]
     else:
         params = model.parameters()
 
-    opt = torch.optim.SGD(params, lr=args.lr_max, momentum=0.9, weight_decay=5e-4)
+    opt = torch.optim.SGD(params, lr=args.lr_max,
+                          momentum=0.9, weight_decay=5e-4)
 
     criterion = nn.CrossEntropyLoss()
 
     epochs = args.epochs
 
     if args.lr_schedule == 'superconverge':
-        lr_schedule = lambda t: np.interp([t], [0, args.epochs * 2 // 5, args.epochs], [0, args.lr_max, 0])[0]
+        def lr_schedule(t): return np.interp(
+            [t], [0, args.epochs * 2 // 5, args.epochs], [0, args.lr_max, 0])[0]
         # lr_schedule = lambda t: np.interp([t], [0, args.epochs], [0, args.lr_max])[0]
     elif args.lr_schedule == 'piecewise':
         def lr_schedule(t):
@@ -232,11 +282,12 @@ def main():
             else:
                 return args.lr_max / 100.
 
-
     if args.resume:
         start_epoch = args.resume
-        model.load_state_dict(torch.load(os.path.join(args.fname, f'model_{start_epoch-1}.pth')))
-        opt.load_state_dict(torch.load(os.path.join(args.fname, f'opt_{start_epoch-1}.pth')))
+        model.load_state_dict(torch.load(os.path.join(
+            args.fname, f'model_{start_epoch-1}.pth')))
+        opt.load_state_dict(torch.load(os.path.join(
+            args.fname, f'opt_{start_epoch-1}.pth')))
         logger.info(f'Resuming at epoch {start_epoch}')
     else:
         start_epoch = 0
@@ -252,6 +303,7 @@ def main():
         train_n = 0
         for i, (X, y) in enumerate(train_loader):
             X, y = X.cuda(), y.cuda()
+            model(X)
             if args.mixup:
                 X, y_a, y_b, lam = mixup_data(X, y, args.mixup_alpha)
                 X, y_a, y_b = map(Variable, (X, y_a, y_b))
@@ -261,23 +313,27 @@ def main():
             if args.attack == 'pgd':
                 # Random initialization
                 if args.mixup:
-                    delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters, args.restarts, args.norm, mixup=True, y_a=y_a, y_b=y_b, lam=lam)
+                    delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters,
+                                       args.restarts, args.norm, mixup=True, y_a=y_a, y_b=y_b, lam=lam)
                 else:
-                    delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters, args.restarts, args.norm)
+                    delta = attack_pgd(
+                        model, X, y, epsilon, pgd_alpha, args.attack_iters, args.restarts, args.norm)
                 delta = delta.detach()
 
             # Standard training
             elif args.attack == 'none':
                 delta = torch.zeros_like(X)
 
-            robust_output = model(normalize(torch.clamp(X + delta[:X.size(0)], min=lower_limit, max=upper_limit)))
+            robust_output = model(normalize(torch.clamp(
+                X + delta[:X.size(0)], min=lower_limit, max=upper_limit)))
             if args.mixup:
-                robust_loss = mixup_criterion(criterion, robust_output, y_a, y_b, lam)
+                robust_loss = mixup_criterion(
+                    criterion, robust_output, y_a, y_b, lam)
             else:
                 robust_loss = criterion(robust_output, y)
 
             if args.l1:
-                for name,param in model.named_parameters():
+                for name, param in model.named_parameters():
                     if 'bn' not in name and 'bias' not in name:
                         robust_loss += args.l1*param.abs().sum()
 
@@ -312,10 +368,12 @@ def main():
             if args.attack == 'none':
                 delta = torch.zeros_like(X)
             else:
-                delta = attack_pgd(model, X, y, epsilon, pgd_alpha, args.attack_iters, args.restarts, args.norm)
+                delta = attack_pgd(model, X, y, epsilon, pgd_alpha,
+                                   args.attack_iters, args.restarts, args.norm)
             delta = delta.detach()
 
-            robust_output = model(normalize(torch.clamp(X + delta[:X.size(0)], min=lower_limit, max=upper_limit)))
+            robust_output = model(normalize(torch.clamp(
+                X + delta[:X.size(0)], min=lower_limit, max=upper_limit)))
             robust_loss = criterion(robust_output, y)
 
             output = model(normalize(X))
@@ -329,11 +387,14 @@ def main():
 
         test_time = time.time()
         logger.info('%d \t %.1f \t \t %.1f \t \t %.4f \t %.4f \t %.4f \t %.4f \t \t %.4f \t \t %.4f \t %.4f \t %.4f \t \t %.4f',
-            epoch, train_time - start_time, test_time - train_time, lr,
-            train_loss/train_n, train_acc/train_n, train_robust_loss/train_n, train_robust_acc/train_n,
-            test_loss/test_n, test_acc/test_n, test_robust_loss/test_n, test_robust_acc/test_n)
-        torch.save(model.state_dict(), os.path.join(args.fname, f'model_{epoch}.pth'))
-        torch.save(opt.state_dict(), os.path.join(args.fname, f'opt_{epoch}.pth'))
+                    epoch, train_time - start_time, test_time - train_time, lr,
+                    train_loss/train_n, train_acc/train_n, train_robust_loss /
+                    train_n, train_robust_acc/train_n,
+                    test_loss/test_n, test_acc/test_n, test_robust_loss/test_n, test_robust_acc/test_n)
+        torch.save(model.state_dict(), os.path.join(
+            args.fname, f'model_{epoch}.pth'))
+        torch.save(opt.state_dict(), os.path.join(
+            args.fname, f'opt_{epoch}.pth'))
 
 
 if __name__ == "__main__":

@@ -3,6 +3,35 @@ import torch.nn as nn
 from . import functional
 
 
+class cat_fc(nn.Module):
+    def __init__(self, num_classes, num_models, frozen=False, full_model=False, model_list=None):
+        super(cat_fc, self).__init__()
+        self.num_classes = num_classes
+        self.num_models = num_models
+        self.frozen = frozen
+        self.fc = nn.Linear(num_models*num_classes, num_classes)
+        self.full_model = full_model
+        if full_model:
+            assert len(model_list) == num_models
+            self.models = nn.ModuleList(model_list)
+
+    def load_models(self, model_list):
+        if self.full_model:
+            raise Exception(
+                "Can't load ensemble models to cat_fc network. Model is full model and has already created ensemble")
+        self.models = nn.ModuleList(model_list)
+        if not self.frozen:
+            return
+        for model in self.models:
+            for param in model.parameters():
+                param.requires_grad = False
+
+    def forward(self, x):
+        outputs = torch.cat([model(x) for model in self.models], dim=1)
+        outputs = self.fc(outputs)
+        return outputs
+
+
 class BasicBlock(nn.Module):
     """Basic Block for resnet 18 and resnet 34
 
@@ -456,11 +485,11 @@ class ensemble_1_resnet50(nn.Module):
         return probs
 
 
-class cat_1_resnet50(nn.Module):
+class cat_1_resnet18(nn.Module):
 
     def __init__(self, num_classes, num_models=1, resnet50=resnet50):
         assert num_models == 1
-        super(cat_1_resnet50, self).__init__()
+        super(cat_1_resnet18, self).__init__()
         self.num_classes = num_classes
         self.num_models = num_models
         self.model_1 = resnet50(self.num_classes)
